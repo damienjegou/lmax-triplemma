@@ -95,18 +95,18 @@
     (.requestHeartbeat session (HeartbeatRequest. (str (System/currentTimeMillis))) (heartbeatCallback))))
 
 (defn amend-stop [instrumentid originstructionid loss profit]
-  (log (format "amend-stop loss %s profit %s%n" loss profit))
+  (log (format "amend-stop loss %s profit %s" loss profit))
   (let [preploss (if loss (FixedPointNumber/valueOf (fitpriceinc (long loss))) nil)
 	prepprofit (if profit (FixedPointNumber/valueOf (fitpriceinc (long profit))) nil)]
-    (log (format "amend-stop : instrumentid : %s, originstructionid : %s, loss : %s, profit : %s, preploss : %s, prepprofit : %s%n"
+    (log (format "amend-stop : instrumentid : %s, originstructionid : %s, loss : %s, profit : %s, preploss : %s, prepprofit : %s"
                  instrumentid originstructionid loss profit preploss prepprofit))
     (dosync (ref-set stopstrack {:loss loss :profit profit}))
     (.amendStops session (AmendStopsRequest. instrumentid originstructionid preploss prepprofit)
 		 (proxy [OrderCallback] []
 		   (onSuccess [amendRequestInstructionId]
-			      (log (format "amend stop request %s for order %s : success%n" amendRequestInstructionId originstructionid)))
+			      (log (format "amend stop request %s for order %s : success" amendRequestInstructionId originstructionid)))
 		   (onFailure [failureReason]
-			      (log (format "amend stop request failed. Reason : %s%n" failureReason)))))))
+			      (log (format "amend stop request failed. Reason : %s" failureReason)))))))
 
 ; ajuster le stop si nécessaire (pas d'ajustement à la baisse)
 (defn adjust-stops [order currentprice stoploss takeprofit]
@@ -154,24 +154,26 @@
 ;; core functions
 
 (defn fire-orders []
-  (if (not @currentorder)
-    (cond (apply > (last @MMAs)) ; up
-          (placeorder (+ bricksize (last @bricks)) 5 800 2500) ; buy
-          (apply < (last @MMAs)) ; down
-          (placeorder (- (last @bricks) bricksize) -5 800 2500)) ; sell
-    (adjust-stops @currentorder)))
+  (let [slossoffset 300
+        sprofitoffset 400]
+    (if (not @currentorder)
+      (cond (apply > (last @MMAs)) ; up
+            (placeorder (+ bricksize (last @bricks)) 5 slossoffset sprofitoffset) ; buy
+            (apply < (last @MMAs)) ; down
+            (placeorder (- (last @bricks) bricksize) -5 slossoffset sprofitoffset)) ; sell
+      (adjust-stops @currentorder (last @bricks) slossoffset sprofitoffset))))
 
 (defn update-at []
   (let [shortval (avg-serie shortavglen @bricks)
         medval (avg-serie medavglen @bricks)
         longval (avg-serie longavglen @bricks)]
     (swap! MMAs (fn [x] (conj x (list shortval medval longval)))))
-  (if (> (count @bricks) medavglen)
+  (if (> (count @bricks) 2)
     (fire-orders)))
 
 (defn update-bricks [orderbookevent]
-  (let [bid (.longValue (.getPrice (.get (.getBidPrices orderbookevent) 0)))
-        ask (.longValue (.getPrice (.get (.getAskPrices orderbookevent) 0)))
+  (let [bid (.longValue (.getValuationBidPrice orderbookevent))
+        ask (.longValue (.getValuationAskPrice orderbookevent))
         averageprice (avg (list bid ask))
         rawdiff (if (last @bricks)
                   (quot (- averageprice (last @bricks)) bricksize)
@@ -182,9 +184,10 @@
           (do (swap! bricks (fn [x] (conj x (+ (last @bricks) (* rawdiff bricksize)))))
               (update-at)))
     
-    (log (format "servertimestamp : %s avgprice : %s (bid : %s, ask : %s), curbrick : %s"
+    (log (format "servertimestamp : %s avgprice : %s (bid : %s, ask : %s), curbrick : %s, totalbricks : %s, curorder : %s"
                  (.getTimeStamp orderbookevent) (long averageprice)
-                 (long bid) (long ask) (last @bricks)))))
+                 (long bid) (long ask) (last @bricks) (count @bricks)
+                 (if @currentorder "true" "false")))))
 
 
 ;; callbacks
